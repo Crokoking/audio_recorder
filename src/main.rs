@@ -17,22 +17,30 @@ fn main() {
         .arg(Arg::new("list").short('l').long("list").required(false).action(ArgAction::SetTrue))
         .get_matches();
 
+    let mut recorder_builder = PvRecorderBuilder::new(512);
+    let audio_devices = recorder_builder.get_available_devices().expect("Failed to get available devices");
+
     if matches.get_flag("list") {
-        list_devices();
-        std::process::exit(0);
+        for (index, audio_device) in audio_devices.iter().enumerate() {
+            println!("Device {:?}: {}", index, audio_device);
+        }
+        return
     }
 
-    let device_id: Option<&i32> = matches.get_one::<i32> ("device");
-    let mut recorder_builder = PvRecorderBuilder::new(512);
-    if let Some(id) = device_id {
+    let device_id_option: Option<&i32> = matches.get_one::<i32> ("device");
+
+    if let Some(id) = device_id_option {
+        println!("Using device {}", audio_devices.get(*id as usize).expect("Invalid device index"));
         recorder_builder.device_index(*id);
     }
 
     ctrlc::set_handler(move || {
         IS_RUNNING.store(false, Ordering::SeqCst);
+        println!("Ctrl-C received!");
     }).expect("Error setting Ctrl-C handler");
 
     let recorder = recorder_builder.init().expect("Failed to init recorder");
+    println!("Starting recorder");
     recorder.start().expect("Failed to start recorder");
 
     let spec = hound::WavSpec {
@@ -67,11 +75,5 @@ fn main() {
 
     wav_writer.flush().map_err(|e| println!("Failed to flush wav writer: {}", e)).unwrap();
     wav_writer.finalize().map_err(|e| println!("Failed to finalize wav writer: {}", e)).unwrap();
-}
-
-fn list_devices() {
-    let audio_devices: Vec<String> = PvRecorderBuilder::default().get_available_devices().expect("Failed to get available devices");
-    for (index, audio_device) in audio_devices.iter().enumerate() {
-        println!("Device {:?}: {}", index, audio_device);
-    }
+    println!("Done");
 }
