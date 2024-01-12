@@ -71,6 +71,7 @@ fn main() {
         for sample in &frame {
             wav_writer.write_sample(*sample).expect("Failed to write sample");
         }
+        wav_writer.flush().expect("Failed to flush wav writer")
     }
 
     wav_writer.flush().map_err(|e| println!("Failed to flush wav writer: {}", e)).unwrap();
