@@ -1,3 +1,2 @@
-REM cargo install -f cross
+REM use wsl for linux build
 cargo build -r
-cross build --target x86_64-unknown-linux-gnu -r
