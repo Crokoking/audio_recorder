@@ -15,14 +15,20 @@ fn main() {
     let matches = command!() // requires `cargo` feature
         .arg(Arg::new("device").short('d').long("device").required(false).value_parser(value_parser!(i32)))
         .arg(Arg::new("output").short('o').long("output").required(true).value_parser(value_parser!(PathBuf)))
+        .arg(Arg::new("lib").long("lib").required(false).value_parser(value_parser!(PathBuf)))
         .arg(Arg::new("list").short('l').long("list").required(false).action(ArgAction::SetTrue))
         .get_matches();
 
     let mut recorder_builder = PvRecorderBuilder::new(512);
 
-    let library_path = determine_library_path();
+    let library_path;
+    if let Some(output_path) = matches.get_one::<PathBuf>("lib") {
+        library_path = output_path;
+    } else {
+        library_path = &determine_library_path();
+    }
 
-    recorder_builder.library_path(&library_path);
+    recorder_builder.library_path(library_path);
 
     let audio_devices = recorder_builder.get_available_devices().expect("Failed to get available devices");
 
@@ -73,16 +79,14 @@ fn main() {
             recorder.stop().map_err(|e| eprintln!("Failed to stop recorder: {}", e)).unwrap();
             break;
         }
-        let frame_option = recorder.read();
-        if frame_option.is_none() {
-            eprintln!("Failed to read frame");
+        if let Some(frame) = recorder.read() {
+            for sample in &frame {
+                wav_writer.write_sample(*sample).expect("Failed to write sample");
+            }
+            wav_writer.flush().expect("Failed to flush wav writer")
+        } else {eprintln!("Failed to read frame");
             std::process::exit(2);
         }
-        let frame = frame_option.unwrap();
-        for sample in &frame {
-            wav_writer.write_sample(*sample).expect("Failed to write sample");
-        }
-        wav_writer.flush().expect("Failed to flush wav writer")
     }
 
     wav_writer.flush().map_err(|e| eprintln!("Failed to flush wav writer: {}", e)).unwrap();
