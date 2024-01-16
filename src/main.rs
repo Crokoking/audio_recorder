@@ -11,6 +11,11 @@ use pv_recorder::PvRecorderBuilder;
 
 static IS_RUNNING: AtomicBool = AtomicBool::new(true);
 
+static LIB_ERROR: i32 = 1;
+static USER_ERROR: i32 = 2;
+static AUDIO_ERROR: i32 = 3;
+static FILE_ERROR: i32 = 4;
+
 fn main() {
     let matches = command!() // requires `cargo` feature
         .arg(Arg::new("device").short('d').long("device").required(false).value_parser(value_parser!(i32)))
@@ -21,16 +26,28 @@ fn main() {
 
     let mut recorder_builder = PvRecorderBuilder::new(512);
 
-    let library_path;
-    if let Some(output_path) = matches.get_one::<PathBuf>("lib") {
-        library_path = output_path;
-    } else {
-        library_path = &determine_library_path();
-    }
+    let library_path = match matches.get_one::<PathBuf>("lib") {
+        Some(path) => path.clone(),
+        None => match determine_library_path() {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("Failed to determine library path: {}", error);
+                std::process::exit(LIB_ERROR);
+            }
+        }
+    };
 
-    recorder_builder.library_path(library_path);
+    println!("Using library {}", library_path.to_string_lossy());
 
-    let audio_devices = recorder_builder.get_available_devices().expect("Failed to get available devices");
+    recorder_builder.library_path(&library_path);
+
+    let audio_devices = match recorder_builder.get_available_devices() {
+        Ok(devices) => devices,
+        Err(error) => {
+            eprintln!("Failed to get available devices: {}", error);
+            std::process::exit(AUDIO_ERROR);
+        }
+    };
 
     if matches.get_flag("list") {
         for (index, audio_device) in audio_devices.iter().enumerate() {
@@ -39,11 +56,14 @@ fn main() {
         return;
     }
 
-    let device_id_option: Option<&i32> = matches.get_one::<i32>("device");
-
-    if let Some(id) = device_id_option {
-        println!("Using device {}", audio_devices.get(*id as usize).expect("Invalid device index"));
-        recorder_builder.device_index(*id);
+    if let Some(id) = matches.get_one::<i32>("device") {
+        if let Some(device) = audio_devices.get(*id as usize) {
+            println!("Using device {}", device);
+            recorder_builder.device_index(*id);
+        } else  {
+            eprintln!("Invalid device index {} specified", id);
+            std::process::exit(USER_ERROR);
+        }
     }
 
     ctrlc::set_handler(move || {
@@ -51,9 +71,18 @@ fn main() {
         println!("Ctrl-C received!");
     }).expect("Error setting Ctrl-C handler");
 
-    let recorder = recorder_builder.init().expect("Failed to init recorder");
+    let recorder = match recorder_builder.init() {
+        Ok(recorder) => recorder,
+        Err(error) => {
+            eprintln!("Failed to initialize recorder: {}", error);
+            std::process::exit(AUDIO_ERROR);
+        }
+    };
     println!("Starting recorder");
-    recorder.start().expect("Failed to start recorder");
+    if let Err(error) = recorder.start() {
+        eprintln!("Failed to start recorder: {}", error);
+        std::process::exit(AUDIO_ERROR);
+    }
 
     let spec = hound::WavSpec {
         channels: 1,
@@ -64,39 +93,81 @@ fn main() {
 
     let mut wav_writer;
     if let Some(output_path) = matches.get_one::<PathBuf>("output") {
-        let file = File::options()
+        let file_result = File::options()
             .write(true)
             .create(true)
-            .open(output_path)
-            .expect("Failed to open output file");
-        wav_writer = WavWriter::new(file, spec).expect("Failed to create WavWriter")
+            .open(output_path);
+        let file = match file_result {
+            Ok(file) => file,
+            Err(error) => {
+                eprintln!("Failed to open output file: {}", error);
+                std::process::exit(FILE_ERROR);
+            }
+        };
+        wav_writer = match WavWriter::new(file, spec) {
+            Ok(wav_writer) => wav_writer,
+            Err(error) => {
+                eprintln!("Failed to create wav writer: {}", error);
+                std::process::exit(AUDIO_ERROR);
+            }
+        }
     } else {
-        panic!("No output specified")
+        eprintln!("No output file specified");
+        std::process::exit(USER_ERROR);
     }
 
     while recorder.is_recording() {
         if !IS_RUNNING.load(Ordering::SeqCst) {
-            recorder.stop().map_err(|e| eprintln!("Failed to stop recorder: {}", e)).unwrap();
+            if let Err(error) = recorder.stop() {
+                eprintln!("Failed to stop recorder: {}", error);
+                std::process::exit(AUDIO_ERROR);
+            }
             break;
         }
-        if let Some(frame) = recorder.read() {
-            for sample in &frame {
-                wav_writer.write_sample(*sample).expect("Failed to write sample");
+        match recorder.read() {
+            Ok(frame) => {
+                for sample in &frame {
+                    if let Err(error) = wav_writer.write_sample(*sample) {
+                        eprintln!("Failed to write sample: {}", error);
+                        std::process::exit(FILE_ERROR);
+                    }
+                }
+                if let Err(error) = wav_writer.flush() {
+                    eprintln!("Failed to flush wav writer: {}", error);
+                    std::process::exit(FILE_ERROR);
+                }
             }
-            wav_writer.flush().expect("Failed to flush wav writer")
-        } else {eprintln!("Failed to read frame");
-            std::process::exit(2);
+            Err(error) => {
+                eprintln!("Failed to read frame: {}", error);
+                std::process::exit(AUDIO_ERROR);
+            }
         }
     }
 
-    wav_writer.flush().map_err(|e| eprintln!("Failed to flush wav writer: {}", e)).unwrap();
-    wav_writer.finalize().map_err(|e| eprintln!("Failed to finalize wav writer: {}", e)).unwrap();
+    if let Err(error) = wav_writer.flush() {
+        eprintln!("Failed to flush wav writer: {}", error);
+        std::process::exit(FILE_ERROR);
+    }
+    if let Err(error) = wav_writer.finalize() {
+        eprintln!("Failed to finalize wav writer: {}", error);
+        std::process::exit(FILE_ERROR);
+    }
     println!("Done");
 }
 
-fn determine_library_path() -> PathBuf {
-    let current_exe_path = determine_current_executable();
-    let current_exe_directory = current_exe_path.parent().expect("Failed to get current executable's directory");
+fn determine_library_path() -> Result<PathBuf, String> {
+    let current_exe_path = match determine_current_executable() {
+        Ok(path) => path,
+        Err(error) => {
+            return Err(format!("Failed to determine current executable: {}", error));
+        }
+    };
+    let current_exe_directory = match current_exe_path.parent() {
+        Some(directory) => directory,
+        None => {
+            return Err("Failed to determine current executable directory".to_string());
+        }
+    };
 
     // Set the library path based on the OS
     let library_filename = if cfg!(target_os = "windows") {
@@ -107,18 +178,28 @@ fn determine_library_path() -> PathBuf {
         "libpv_recorder.so"
     };
     let library_path = current_exe_directory.join(library_filename);
-    library_path
+    return Ok(library_path)
 }
 
-fn determine_current_executable() -> PathBuf {
-    let mut current_exe_path = env::current_exe().expect("Failed to get current executable's path");
+fn determine_current_executable() -> Result<PathBuf, String> {
+    let mut current_exe_path = match env::current_exe() {
+        Ok(path) => path,
+        Err(error) => {
+            return Err(format!("Failed to determine current executable path: {}", error));
+        }
+    };
     let mut counter = 0;
     while current_exe_path.is_symlink() {
-        current_exe_path = current_exe_path.read_link().expect("Failed to get current executable's path");
+        current_exe_path = match current_exe_path.read_link() {
+            Ok(path) => path,
+            Err(error) => {
+                return Err(format!("Failed to read symlink {}: {}", current_exe_path.to_string_lossy(), error));
+            }
+        };
         counter += 1;
         if counter > 10 {
-            panic!("Too many symlinks when looking for current executable's path");
+            return Err("Too many symlinks when trying to determine the executable path".to_string());
         }
     }
-    current_exe_path
+    Ok(current_exe_path)
 }
