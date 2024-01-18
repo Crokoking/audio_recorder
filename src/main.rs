@@ -18,9 +18,9 @@ static FILE_ERROR: i32 = 4;
 
 fn main() {
     let matches = command!() // requires `cargo` feature
-        .arg(Arg::new("device").short('d').long("device").required(false).takes_value(true).value_parser(value_parser!(i32)))
-        .arg(Arg::new("output").short('o').long("output").required(true).takes_value(true).value_parser(value_parser!(PathBuf)))
-        .arg(Arg::new("lib").long("lib").required(false).takes_value(true).value_parser(value_parser!(PathBuf)))
+        .arg(Arg::new("device").short('d').long("device").required(false).value_parser(value_parser!(i32)))
+        .arg(Arg::new("output").short('o').long("output").required(true).value_parser(value_parser!(PathBuf)))
+        .arg(Arg::new("lib").long("lib").required(false).value_parser(value_parser!(PathBuf)))
         .arg(Arg::new("list").short('l').long("list").required(false).action(ArgAction::SetTrue))
         .get_matches();
 
