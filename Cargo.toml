@@ -8,7 +8,7 @@ strip = true  # Automatically strip symbols from the binary.
 opt-level = "z"  # Optimize for size.
 
 [dependencies]
-clap = { version = "4.4.14", features = ["cargo"] }
+clap = { version = "3.2.25", features = ["cargo"] }
 ctrlc = { version = "3.4.2", features = ["termination"] }
 hound = "3.5.1"
 pv_recorder = "1.2.1"
