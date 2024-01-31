@@ -3,7 +3,7 @@ use std::fs::File;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use clap::{Arg, ArgAction, command, value_parser};
+use clap::{Arg, ArgAction, ArgMatches, command, value_parser};
 use ctrlc;
 use hound::SampleFormat;
 use hound::WavWriter;
@@ -24,22 +24,7 @@ fn main() {
         .arg(Arg::new("list").short('l').long("list").required(false).action(ArgAction::SetTrue))
         .get_matches();
 
-    let mut recorder_builder = PvRecorderBuilder::new(512);
-
-    let library_path = match matches.get_one::<PathBuf>("lib") {
-        Some(path) => path.clone(),
-        None => match determine_library_path() {
-            Ok(path) => path,
-            Err(error) => {
-                eprintln!("Failed to determine library path: {}", error);
-                std::process::exit(LIB_ERROR);
-            }
-        }
-    };
-
-    println!("Using library {}", library_path.to_string_lossy());
-
-    recorder_builder.library_path(&library_path);
+    let mut recorder_builder = create_recorder_builder(&matches);
 
     let audio_devices = match recorder_builder.get_available_devices() {
         Ok(devices) => devices,
@@ -78,43 +63,17 @@ fn main() {
             std::process::exit(AUDIO_ERROR);
         }
     };
+
     println!("Starting recorder");
-    if let Err(error) = recorder.start() {
+    let start_result = recorder.start();
+    if let Err(error) = start_result {
         eprintln!("Failed to start recorder: {}", error);
         std::process::exit(AUDIO_ERROR);
     }
 
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate: recorder.sample_rate() as u32,
-        bits_per_sample: 16,
-        sample_format: SampleFormat::Int,
-    };
+    let sample_rate = recorder.sample_rate() as u32;
 
-    let mut wav_writer;
-    if let Some(output_path) = matches.get_one::<PathBuf>("output") {
-        let file_result = File::options()
-            .write(true)
-            .create(true)
-            .open(output_path);
-        let file = match file_result {
-            Ok(file) => file,
-            Err(error) => {
-                eprintln!("Failed to open output file: {}", error);
-                std::process::exit(FILE_ERROR);
-            }
-        };
-        wav_writer = match WavWriter::new(file, spec) {
-            Ok(wav_writer) => wav_writer,
-            Err(error) => {
-                eprintln!("Failed to create wav writer: {}", error);
-                std::process::exit(AUDIO_ERROR);
-            }
-        }
-    } else {
-        eprintln!("No output file specified");
-        std::process::exit(USER_ERROR);
-    }
+    let mut wav_writer = create_wav_writer(matches, sample_rate);
 
     while recorder.is_recording() {
         if !IS_RUNNING.load(Ordering::SeqCst) {
@@ -153,6 +112,60 @@ fn main() {
         std::process::exit(FILE_ERROR);
     }
     println!("Done");
+}
+
+fn create_recorder_builder(matches: &ArgMatches) -> PvRecorderBuilder {
+    let mut recorder_builder = PvRecorderBuilder::new(512);
+
+    let library_path = match matches.get_one::<PathBuf>("lib") {
+        Some(path) => path.clone(),
+        None => match determine_library_path() {
+            Ok(path) => path,
+            Err(error) => {
+                eprintln!("Failed to determine library path: {}", error);
+                std::process::exit(LIB_ERROR);
+            }
+        }
+    };
+
+    println!("Using library {}", library_path.to_string_lossy());
+
+    recorder_builder.library_path(&library_path);
+    recorder_builder
+}
+
+fn create_wav_writer(matches: ArgMatches, sample_rate: u32) -> WavWriter<File> {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate,
+        bits_per_sample: 16,
+        sample_format: SampleFormat::Int,
+    };
+
+    let mut wav_writer = if let Some(output_path) = matches.get_one::<PathBuf>("output") {
+        let file_result = File::options()
+            .write(true)
+            .create(true)
+            .open(output_path);
+        let file = match file_result {
+            Ok(file) => file,
+            Err(error) => {
+                eprintln!("Failed to open output file: {}", error);
+                std::process::exit(FILE_ERROR);
+            }
+        };
+        match WavWriter::new(file, spec) {
+            Ok(wav_writer) => wav_writer,
+            Err(error) => {
+                eprintln!("Failed to create wav writer: {}", error);
+                std::process::exit(AUDIO_ERROR);
+            }
+        }
+    } else {
+        eprintln!("No output file specified");
+        std::process::exit(USER_ERROR);
+    };
+    wav_writer
 }
 
 fn determine_library_path() -> Result<PathBuf, String> {
