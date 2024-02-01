@@ -1,5 +1,6 @@
 use std::env;
 use std::fs::File;
+use std::io::{stdout, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -25,11 +26,22 @@ const SILENCE_FACTOR: f32 = 0.9;
 fn main() {
     let matches = command!() // requires `cargo` feature
         .arg(Arg::new("device").short('d').long("device").required(false).value_parser(value_parser!(i32)))
-        .arg(Arg::new("output").short('o').long("output").required(true).value_parser(value_parser!(PathBuf)))
+        .arg(Arg::new("output").short('o').long("output").required(false).value_parser(value_parser!(PathBuf)))
+        .arg(Arg::new("stream").long("stream").required(false).action(ArgAction::SetTrue).help("Stream audio to stdout instead of writing to a file"))
         .arg(Arg::new("lib").long("lib").required(false).value_parser(value_parser!(PathBuf)))
         .arg(Arg::new("list").short('l').long("list").required(false).action(ArgAction::SetTrue))
         .arg(Arg::new("stop-silence").short('s').long("stop-silence").required(false).value_parser(value_parser!(u64)).help("Stop recording after this many milliseconds of silence"))
         .get_matches();
+
+    if matches.get_flag("stream") && matches.get_one::<PathBuf>("output").is_some() {
+        eprintln!("Cannot specify both --stream and --output");
+        std::process::exit(USER_ERROR);
+    }
+
+    if !matches.get_flag("stream") && matches.get_one::<PathBuf>("output").is_none() {
+        eprintln!("Must specify either --stream or --output");
+        std::process::exit(USER_ERROR);
+    }
 
     let mut recorder_builder = create_recorder_builder(&matches);
 
@@ -52,7 +64,7 @@ fn main() {
         if let Some(device) = audio_devices.get(*id as usize) {
             eprintln!("Using device {}", device);
             recorder_builder.device_index(*id);
-        } else  {
+        } else {
             eprintln!("Invalid device index {} specified", id);
             std::process::exit(USER_ERROR);
         }
@@ -60,10 +72,13 @@ fn main() {
 
     let silence_threshold_ms = matches.get_one::<u64>("stop-silence").copied().unwrap_or(0);
 
-    ctrlc::set_handler(move || {
+    if let Err(error) = ctrlc::set_handler(move || {
         IS_RUNNING.store(false, Ordering::SeqCst);
         eprintln!("Ctrl-C received!");
-    }).expect("Error setting Ctrl-C handler");
+    }) {
+        eprintln!("Failed to set Ctrl-C handler: {}", error);
+        std::process::exit(FILE_ERROR);
+    }
 
     let recorder = match recorder_builder.init() {
         Ok(recorder) => recorder,
@@ -83,7 +98,11 @@ fn main() {
     let sample_rate = recorder.sample_rate() as u32;
     let sample_rate_float = sample_rate as f64;
 
-    let mut wav_writer = create_wav_writer(&matches, sample_rate);
+    let mut wav_writer = if !matches.get_flag("stream") {
+        Some(create_wav_writer(&matches, sample_rate))
+    } else {
+        None
+    };
 
 
     let mut silence_duration_ms = 0u64;
@@ -92,7 +111,15 @@ fn main() {
     let mut rms_moving_average = 0.0f32;
     let mut dynamic_silence_threshold;
 
-    while recorder.is_recording() && silence_duration_ms < silence_threshold_ms {
+    if wav_writer.is_none() {
+        let sample_rate_bytes = sample_rate.to_le_bytes();
+        if let Err(error) = stdout().write(&sample_rate_bytes) {
+            eprintln!("Failed to write sample rate to stdout: {}", error);
+            std::process::exit(FILE_ERROR);
+        }
+    }
+
+    while recorder.is_recording() {
         match recorder.read() {
             Ok(frame) => {
                 let rms = calculate_rms(&frame);
@@ -108,24 +135,40 @@ fn main() {
 
                 if rms < dynamic_silence_threshold {
                     silence_duration_ms += frame_duration_ms;
-                    if silence_threshold_ms > 0 &&  silence_duration_ms >= silence_threshold_ms {
+                    if silence_threshold_ms > 0 && silence_duration_ms >= silence_threshold_ms {
                         eprintln!("Stopping recording due to silence.");
-                        recorder.stop().expect("Failed to stop recorder");
+                        if let Err(error) = recorder.stop() {
+                            eprintln!("Failed to stop recorder: {}", error);
+                            std::process::exit(AUDIO_ERROR);
+                        }
                         break;
                     }
                 } else {
                     silence_duration_ms = 0; // Reset silence duration if noise is detected
                 }
 
-                for sample in &frame {
-                    if let Err(error) = wav_writer.write_sample(*sample) {
-                        eprintln!("Failed to write sample: {}", error);
+                if let Some(ref mut writer) = wav_writer {
+                    for sample in &frame {
+                        if let Err(error) = writer.write_sample(*sample) {
+                            eprintln!("Failed to write sample: {}", error);
+                            std::process::exit(FILE_ERROR);
+                        }
+                    }
+                    if let Err(error) = writer.flush() {
+                        eprintln!("Failed to flush wav writer: {}", error);
                         std::process::exit(FILE_ERROR);
                     }
-                }
-                if let Err(error) = wav_writer.flush() {
-                    eprintln!("Failed to flush wav writer: {}", error);
-                    std::process::exit(FILE_ERROR);
+                } else {
+                    // Streaming mode: write raw audio data to stdout
+                    let stdout = stdout();
+                    let mut handle = stdout.lock();
+                    for sample in &frame {
+                        let bytes = sample.to_ne_bytes();
+                        if let Err(error) = handle.write_all(&bytes) {
+                            eprintln!("Failed to write sample: {}", error);
+                            std::process::exit(FILE_ERROR);
+                        }
+                    }
                 }
             }
             Err(error) => {
@@ -135,13 +178,15 @@ fn main() {
         }
     }
 
-    if let Err(error) = wav_writer.flush() {
-        eprintln!("Failed to flush wav writer: {}", error);
-        std::process::exit(FILE_ERROR);
-    }
-    if let Err(error) = wav_writer.finalize() {
-        eprintln!("Failed to finalize wav writer: {}", error);
-        std::process::exit(FILE_ERROR);
+    if let Some(mut writer) = wav_writer {
+        if let Err(error) = writer.flush() {
+            eprintln!("Failed to flush wav writer: {}", error);
+            std::process::exit(FILE_ERROR);
+        }
+        if let Err(error) = writer.finalize() {
+            eprintln!("Failed to finalize wav writer: {}", error);
+            std::process::exit(FILE_ERROR);
+        }
     }
     eprintln!("Done");
 }
@@ -223,7 +268,7 @@ fn determine_library_path() -> Result<PathBuf, String> {
         "libpv_recorder.so"
     };
     let library_path = current_exe_directory.join(library_filename);
-    return Ok(library_path)
+    return Ok(library_path);
 }
 
 fn determine_current_executable() -> Result<PathBuf, String> {
