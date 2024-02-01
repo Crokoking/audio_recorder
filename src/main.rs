@@ -43,14 +43,14 @@ fn main() {
 
     if matches.get_flag("list") {
         for (index, audio_device) in audio_devices.iter().enumerate() {
-            println!("Device {:?}: {}", index, audio_device);
+            eprintln!("Device {:?}: {}", index, audio_device);
         }
         return;
     }
 
     if let Some(id) = matches.get_one::<i32>("device") {
         if let Some(device) = audio_devices.get(*id as usize) {
-            println!("Using device {}", device);
+            eprintln!("Using device {}", device);
             recorder_builder.device_index(*id);
         } else  {
             eprintln!("Invalid device index {} specified", id);
@@ -62,7 +62,7 @@ fn main() {
 
     ctrlc::set_handler(move || {
         IS_RUNNING.store(false, Ordering::SeqCst);
-        println!("Ctrl-C received!");
+        eprintln!("Ctrl-C received!");
     }).expect("Error setting Ctrl-C handler");
 
     let recorder = match recorder_builder.init() {
@@ -73,7 +73,7 @@ fn main() {
         }
     };
 
-    println!("Starting recorder");
+    eprintln!("Starting recorder");
     let start_result = recorder.start();
     if let Err(error) = start_result {
         eprintln!("Failed to start recorder: {}", error);
@@ -109,7 +109,7 @@ fn main() {
                 if rms < dynamic_silence_threshold {
                     silence_duration_ms += frame_duration_ms;
                     if silence_threshold_ms > 0 &&  silence_duration_ms >= silence_threshold_ms {
-                        println!("Stopping recording due to silence.");
+                        eprintln!("Stopping recording due to silence.");
                         recorder.stop().expect("Failed to stop recorder");
                         break;
                     }
@@ -143,7 +143,7 @@ fn main() {
         eprintln!("Failed to finalize wav writer: {}", error);
         std::process::exit(FILE_ERROR);
     }
-    println!("Done");
+    eprintln!("Done");
 }
 
 fn create_recorder_builder(matches: &ArgMatches) -> PvRecorderBuilder {
@@ -160,7 +160,7 @@ fn create_recorder_builder(matches: &ArgMatches) -> PvRecorderBuilder {
         }
     };
 
-    println!("Using library {}", library_path.to_string_lossy());
+    eprintln!("Using library {}", library_path.to_string_lossy());
 
     recorder_builder.library_path(&library_path);
     recorder_builder
