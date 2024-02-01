@@ -16,12 +16,16 @@ static USER_ERROR: i32 = 2;
 static AUDIO_ERROR: i32 = 3;
 static FILE_ERROR: i32 = 4;
 
+// Define a silence threshold. You might need to adjust this based on your specific needs.
+const SILENCE_THRESHOLD: f32 = 0.01;
+
 fn main() {
     let matches = command!() // requires `cargo` feature
         .arg(Arg::new("device").short('d').long("device").required(false).value_parser(value_parser!(i32)))
         .arg(Arg::new("output").short('o').long("output").required(true).value_parser(value_parser!(PathBuf)))
         .arg(Arg::new("lib").long("lib").required(false).value_parser(value_parser!(PathBuf)))
         .arg(Arg::new("list").short('l').long("list").required(false).action(ArgAction::SetTrue))
+        .arg(Arg::new("silence").long("silence").required(false).value_parser(value_parser!(u64)).help("Stop recording after this many milliseconds of silence"))
         .get_matches();
 
     let mut recorder_builder = create_recorder_builder(&matches);
@@ -51,6 +55,8 @@ fn main() {
         }
     }
 
+    let silence_threshold_ms = matches.get_one::<u64>("silence").copied().unwrap_or(0);
+
     ctrlc::set_handler(move || {
         IS_RUNNING.store(false, Ordering::SeqCst);
         println!("Ctrl-C received!");
@@ -72,19 +78,32 @@ fn main() {
     }
 
     let sample_rate = recorder.sample_rate() as u32;
+    let sample_rate_float = sample_rate as f64;
 
-    let mut wav_writer = create_wav_writer(matches, sample_rate);
+    let mut wav_writer = create_wav_writer(&matches, sample_rate);
 
-    while recorder.is_recording() {
-        if !IS_RUNNING.load(Ordering::SeqCst) {
-            if let Err(error) = recorder.stop() {
-                eprintln!("Failed to stop recorder: {}", error);
-                std::process::exit(AUDIO_ERROR);
-            }
-            break;
-        }
+
+    let mut silence_duration_ms = 0u64;
+
+    while recorder.is_recording() && silence_duration_ms < silence_threshold_ms {
         match recorder.read() {
             Ok(frame) => {
+                let rms = calculate_rms(&frame);
+
+                // Calculate frame duration in milliseconds
+                let frame_duration_ms = (1000f64 * frame.len() as f64 / sample_rate_float) as u64;
+
+                if rms < SILENCE_THRESHOLD {
+                    println!("Silence detected");
+                    silence_duration_ms += frame_duration_ms;
+                    if silence_threshold_ms > 0 &&  silence_duration_ms >= silence_threshold_ms {
+                        println!("Stopping recording due to silence.");
+                        break;
+                    }
+                } else {
+                    silence_duration_ms = 0; // Reset silence duration if noise is detected
+                }
+
                 for sample in &frame {
                     if let Err(error) = wav_writer.write_sample(*sample) {
                         eprintln!("Failed to write sample: {}", error);
@@ -134,7 +153,7 @@ fn create_recorder_builder(matches: &ArgMatches) -> PvRecorderBuilder {
     recorder_builder
 }
 
-fn create_wav_writer(matches: ArgMatches, sample_rate: u32) -> WavWriter<File> {
+fn create_wav_writer(matches: &ArgMatches, sample_rate: u32) -> WavWriter<File> {
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate,
@@ -215,4 +234,11 @@ fn determine_current_executable() -> Result<PathBuf, String> {
         }
     }
     Ok(current_exe_path)
+}
+
+// Function to calculate the RMS value of an audio frame
+fn calculate_rms(frame: &[i16]) -> f32 {
+    let sum_of_squares: i64 = frame.iter().map(|&sample| (sample as i64).pow(2)).sum();
+    let mean_square = sum_of_squares as f32 / frame.len() as f32;
+    mean_square.sqrt()
 }
