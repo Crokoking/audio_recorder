@@ -28,7 +28,7 @@ fn main() {
         .arg(Arg::new("output").short('o').long("output").required(true).value_parser(value_parser!(PathBuf)))
         .arg(Arg::new("lib").long("lib").required(false).value_parser(value_parser!(PathBuf)))
         .arg(Arg::new("list").short('l').long("list").required(false).action(ArgAction::SetTrue))
-        .arg(Arg::new("silence").short('s').long("silence").required(false).value_parser(value_parser!(u64)).help("Stop recording after this many milliseconds of silence"))
+        .arg(Arg::new("stop-silence").short('s').long("stop-silence").required(false).value_parser(value_parser!(u64)).help("Stop recording after this many milliseconds of silence"))
         .get_matches();
 
     let mut recorder_builder = create_recorder_builder(&matches);
@@ -58,7 +58,7 @@ fn main() {
         }
     }
 
-    let silence_threshold_ms = matches.get_one::<u64>("silence").copied().unwrap_or(0);
+    let silence_threshold_ms = matches.get_one::<u64>("stop-silence").copied().unwrap_or(0);
 
     ctrlc::set_handler(move || {
         IS_RUNNING.store(false, Ordering::SeqCst);
