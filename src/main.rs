@@ -16,8 +16,11 @@ static USER_ERROR: i32 = 2;
 static AUDIO_ERROR: i32 = 3;
 static FILE_ERROR: i32 = 4;
 
-// Define a silence threshold. You might need to adjust this based on your specific needs.
-const SILENCE_THRESHOLD: f32 = 0.01;
+
+/** Smoothing factor for the moving average */
+const ALPHA: f32 = 0.1;
+
+const SILENCE_FACTOR: f32 = 0.9;
 
 fn main() {
     let matches = command!() // requires `cargo` feature
@@ -25,7 +28,7 @@ fn main() {
         .arg(Arg::new("output").short('o').long("output").required(true).value_parser(value_parser!(PathBuf)))
         .arg(Arg::new("lib").long("lib").required(false).value_parser(value_parser!(PathBuf)))
         .arg(Arg::new("list").short('l').long("list").required(false).action(ArgAction::SetTrue))
-        .arg(Arg::new("silence").long("silence").required(false).value_parser(value_parser!(u64)).help("Stop recording after this many milliseconds of silence"))
+        .arg(Arg::new("silence").short('s').long("silence").required(false).value_parser(value_parser!(u64)).help("Stop recording after this many milliseconds of silence"))
         .get_matches();
 
     let mut recorder_builder = create_recorder_builder(&matches);
@@ -85,19 +88,29 @@ fn main() {
 
     let mut silence_duration_ms = 0u64;
 
+    // Initialize variables for the moving average calculation
+    let mut rms_moving_average = 0.0f32;
+    let mut dynamic_silence_threshold;
+
     while recorder.is_recording() && silence_duration_ms < silence_threshold_ms {
         match recorder.read() {
             Ok(frame) => {
                 let rms = calculate_rms(&frame);
 
+                // Update the moving average of RMS values
+                rms_moving_average = (ALPHA * rms) + ((1.0 - ALPHA) * rms_moving_average);
+
+                // Adjust the dynamic silence threshold based on the moving average
+                dynamic_silence_threshold = rms_moving_average * SILENCE_FACTOR;
+
                 // Calculate frame duration in milliseconds
                 let frame_duration_ms = (1000f64 * frame.len() as f64 / sample_rate_float) as u64;
 
-                if rms < SILENCE_THRESHOLD {
-                    println!("Silence detected");
+                if rms < dynamic_silence_threshold {
                     silence_duration_ms += frame_duration_ms;
                     if silence_threshold_ms > 0 &&  silence_duration_ms >= silence_threshold_ms {
                         println!("Stopping recording due to silence.");
+                        recorder.stop().expect("Failed to stop recorder");
                         break;
                     }
                 } else {
@@ -161,7 +174,7 @@ fn create_wav_writer(matches: &ArgMatches, sample_rate: u32) -> WavWriter<File> 
         sample_format: SampleFormat::Int,
     };
 
-    let mut wav_writer = if let Some(output_path) = matches.get_one::<PathBuf>("output") {
+    let wav_writer = if let Some(output_path) = matches.get_one::<PathBuf>("output") {
         let file_result = File::options()
             .write(true)
             .create(true)
