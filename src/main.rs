@@ -1,6 +1,6 @@
 use std::env;
 use std::fs::File;
-use std::io::{stdout, Write};
+use std::io::{stdout, StdoutLock, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -22,6 +22,19 @@ static FILE_ERROR: i32 = 4;
 const ALPHA: f32 = 0.1;
 
 const SILENCE_FACTOR: f32 = 0.9;
+
+const BYTE_CONFIG: u8 = 1u8;
+const BYTE_FRAME: u8 = 2u8;
+const BYTE_CURRENT_VERSION: u8 = 1u8;
+
+/*
+Stream format:
+<stream header> <frame bytes> <frame bytes> <frame bytes> ...
+<stream header> = <version byte = 1> <config byte = 1> <sample rate bytes LE = u32>
+<frame bytes> = <frame init byte = 2> <silence detection byte = 0(noise)/1(silence)> <frame length bytes LE = u32>
+    <sample bytes LE = i16> <sample bytes LE = i16> <sample bytes LE = i16> ...
+
+*/
 
 fn main() {
     let matches = command!() // requires `cargo` feature
@@ -113,10 +126,9 @@ fn main() {
 
     if wav_writer.is_none() {
         let sample_rate_bytes = sample_rate.to_le_bytes();
-        if let Err(error) = stdout().write(&sample_rate_bytes) {
-            eprintln!("Failed to write sample rate to stdout: {}", error);
-            std::process::exit(FILE_ERROR);
-        }
+        let mut handle = stdout().lock();
+        write_to_stdout(&mut handle, &[BYTE_CURRENT_VERSION, BYTE_CONFIG]);
+        write_to_stdout(&mut handle, &sample_rate_bytes);
     }
 
     while recorder.is_recording() {
@@ -133,7 +145,9 @@ fn main() {
                 // Calculate frame duration in milliseconds
                 let frame_duration_ms = (1000f64 * frame.len() as f64 / sample_rate_float) as u64;
 
-                if rms < dynamic_silence_threshold {
+                let is_silence = rms < dynamic_silence_threshold;
+
+                if is_silence {
                     silence_duration_ms += frame_duration_ms;
                     if silence_threshold_ms > 0 && silence_duration_ms >= silence_threshold_ms {
                         eprintln!("Stopping recording due to silence.");
@@ -162,12 +176,12 @@ fn main() {
                     // Streaming mode: write raw audio data to stdout
                     let stdout = stdout();
                     let mut handle = stdout.lock();
+                    write_to_stdout(&mut handle, &[BYTE_FRAME]);
+                    write_to_stdout(&mut handle, &[is_silence as u8]);
+                    write_to_stdout(&mut handle, &frame.len().to_le_bytes());
                     for sample in &frame {
-                        let bytes = sample.to_ne_bytes();
-                        if let Err(error) = handle.write_all(&bytes) {
-                            eprintln!("Failed to write sample: {}", error);
-                            std::process::exit(FILE_ERROR);
-                        }
+                        let bytes = sample.to_le_bytes();
+                        write_to_stdout(&mut handle, &bytes);
                     }
                 }
             }
@@ -189,6 +203,13 @@ fn main() {
         }
     }
     eprintln!("Done");
+}
+
+fn write_to_stdout(lock: &mut StdoutLock, bytes: &[u8]) {
+    if let Err(error) = lock.write(&bytes) {
+        eprintln!("Failed to write to stdout: {}", error);
+        std::process::exit(FILE_ERROR);
+    }
 }
 
 fn create_recorder_builder(matches: &ArgMatches) -> PvRecorderBuilder {
