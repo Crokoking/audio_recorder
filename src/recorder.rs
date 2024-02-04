@@ -36,7 +36,7 @@ Stream format:
 */
 
 pub fn list_devices(lib: Option<&PathBuf>) {
-    let mut recorder_builder = create_recorder_builder(lib);
+    let recorder_builder = create_recorder_builder(lib);
 
     let audio_devices = match recorder_builder.get_available_devices() {
         Ok(devices) => devices,
