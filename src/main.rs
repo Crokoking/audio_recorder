@@ -14,9 +14,16 @@ fn main() {
         .arg(Arg::new("output").short('o').long("output").required(false).value_parser(value_parser!(PathBuf)))
         .arg(Arg::new("stream").long("stream").required(false).action(ArgAction::SetTrue).help("Stream audio to stdout instead of writing to a file"))
         .arg(Arg::new("lib").long("lib").required(false).value_parser(value_parser!(PathBuf)))
+        .arg(Arg::new("play").short('p').long("play").required(false).value_parser(value_parser!(PathBuf)).help("Play a file instead of recording"))
         .arg(Arg::new("list").short('l').long("list").required(false).action(ArgAction::SetTrue))
         .arg(Arg::new("stop-silence").short('s').long("stop-silence").required(false).value_parser(value_parser!(u64)).help("Stop recording after this many milliseconds of silence"))
         .get_matches();
+
+    if matches.get_one::<PathBuf>("play").is_some() {
+        let file = matches.get_one::<PathBuf>("play").unwrap();
+        audio_recorder::player::play(file);
+        return;
+    }
 
     if matches.get_flag("stream") && matches.get_one::<PathBuf>("output").is_some() {
         eprintln!("Cannot specify both --stream and --output");
